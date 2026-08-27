@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jgard28.gridsnap",
   "name": "Omarchy Grid Snap",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "jgard28",
   "description": "Snap the focused window into a grid cell on any monitor, with optional transparency and pin-across-workspaces -- built for watching a video window while working elsewhere",
   "kinds": ["service", "bar-widget"],

@@ -6,7 +6,7 @@ in front of it. Pick a monitor, pick a grid size, click a cell, optionally
 make it semi-transparent and pin it so it stays visible no matter which
 workspace you switch to.
 
-Plugin id: `jgard28.gridsnap` · version **1.0.0**
+Plugin id: `jgard28.gridsnap` · version **1.1.0**
 
 ## Install
 
@@ -19,12 +19,18 @@ omarchy plugin add https://github.com/jgard28/omarchy-grid-snap.git --enable
 1. Focus the window you want to snap (your video window/tab).
 2. **Left-click** the bar icon — this captures whatever window was just
    focused *before* the panel can steal focus itself, then opens the
-   panel.
+   panel. The panel's title bar shows exactly which window got captured,
+   and the monitor picker defaults to wherever that window actually is
+   (not always the first monitor or whatever was picked last time).
 3. Pick a monitor, a grid size (columns × rows), and click a cell.
 4. Optionally lower **Opacity** and/or leave **Pin across workspaces** on.
 5. Click **Snap here**.
 6. **Restore** in the panel (or right-click the bar icon at any time) puts
    the window back to normal tiled behavior.
+
+If no window was focused when you opened the panel (or IPC couldn't find
+one), the panel says so plainly and **Snap**/**Restore** are disabled
+rather than failing silently.
 
 Clicking **Snap here** again with the window still snapped is safe —
 snapping is idempotent, it won't toggle floating/pin back off on a second
@@ -47,6 +53,13 @@ position (`hyprctl monitors -j`), not a fixed assumption — a 2×2 grid on a
 2560×1440 monitor and a 2×2 grid on a 1920×1080 one both correctly cover
 their own monitor edge-to-edge. The monitor picker lists whatever's
 actually connected.
+
+Cells are also carved out of each monitor's *usable* area, not its full
+physical size — `hyprctl monitors -j` reports a `reserved` margin for
+whatever's claimed exclusive screen space (the Omarchy bar, confirmed as
+26px reserved at the top on every monitor here). Dividing the raw monitor
+rect instead (an early bug, see CHANGELOG.md) put the whole top row of
+cells partially underneath the bar.
 
 ## Requirements
 
@@ -75,17 +88,31 @@ being used here:
 
 The one genuinely best-effort part: **there is no live per-window opacity
 dispatcher** in this API, only a declarative `hl.window_rule({ match =
-{ title }, opacity })`, which matches by window *title*, not by address.
-That means:
-- It can affect another window that happens to share the exact same title
-  (rare in practice, but possible).
-- There's no confirmed way to cleanly *remove* a rule once applied — the
-  Restore button re-applies the rule with opacity `1.0 1.0` to the same
-  title match rather than un-registering it.
-- The call was confirmed to execute without a Lua error, but not
-  independently confirmed to visually change opacity on this specific
-  Hyprland build. If it doesn't work for you, please open an issue with
-  what `hyprctl eval` returns for the `hl.window_rule(...)` call in
+{ title, class }, opacity })`, which matches by window *title*/*class*,
+not by address. Confirmed live, the hard way: **a rule applied this way
+outlives the window it was meant for** — closing that window and later
+opening an unrelated one with the same title silently inherited the old
+opacity. That's a real "this plugin affected something I never touched"
+risk, not a cosmetic one, so it's handled explicitly rather than just
+documented:
+
+- Every window this plugin applies a non-1.0 opacity to is tracked
+  (address + title + class) in its own settings until proven closed.
+- Every 30 seconds (and once at startup), the service checks which
+  tracked windows are no longer open and resets *their* rule back to
+  opacity 1.0 — since the window it was for is gone, that reset can only
+  ever affect some later, unrelated window, never one currently in use.
+- A rule is never touched while its window is still open, so this can't
+  undo an opacity setting you're actively using.
+- Matching on **both** title and class (not title alone) further narrows
+  the odds of ever hitting an unrelated window in the first place — this
+  was accepted by `hl.window_rule` without error, though not
+  independently confirmed to narrow matching on this specific Hyprland
+  build.
+- The call itself was confirmed to execute without a Lua error and to
+  visibly change a real window's opacity in a screenshot. If it doesn't
+  work for you, please open an issue with what `hyprctl eval` returns for
+  the `hl.window_rule(...)` line in
   `~/.local/state/jgard28.gridsnap/snap.sh` run by hand.
 
 Move/resize order matters: **resize runs before move**, not after —
@@ -99,15 +126,22 @@ disturb the final position; this was confirmed to land a window at the
 
 - **`manifest.json`** — plugin metadata.
 - **`Service.qml`** — persisted settings (grid size, last-picked
-  monitor/cell, opacity, pin preference), monitor list (`hyprctl monitors
-  -j`), target-window capture (`hyprctl activewindow -j`), and writes/runs
-  the snap/unsnap scripts.
+  monitor/cell, opacity, pin preference, tracked opacity rules), monitor
+  list (`hyprctl monitors -j`), target-window capture (`hyprctl
+  activewindow -j`, auto-selecting that window's monitor in the picker),
+  the periodic opacity-rule sweep, and writes/runs the snap/unsnap/reset
+  scripts. `captureTargetThen()` is what the IPC `snap`/`unsnap` commands
+  use to avoid a race where they'd act on stale target data from a
+  previous capture — see its comment for why a plain `Qt.callLater` isn't
+  safe here.
 - **`BarWidget.qml`** — the bar icon and IPC. Captures the target window
   in the click handler, *before* the panel can open and steal focus.
 - **`Panel.qml`** — monitor picker, grid size steppers, a click-a-cell
-  visual grid, opacity slider, pin toggle, Snap/Restore buttons.
+  visual grid, opacity slider, pin toggle, Snap/Restore buttons (disabled
+  with an explanation when no window is captured).
 - **`Model.js`** — param definitions, the monitor/window JSON parsers, the
-  cell-rect geometry math, and the actual snap.sh/unsnap.sh script text.
+  cell-rect geometry math, and the actual snap.sh/unsnap.sh/reset.sh
+  script text.
 
 Scripts are generated once to `${XDG_STATE_HOME:-~/.local/state}/jgard28.gridsnap/`
 and invoked with fresh arguments per click, rather than being rebuilt as a
@@ -133,7 +167,10 @@ omarchy-shell jgard28.gridsnap <command> [args]
 
 ## Known limitations
 
-- Opacity is best-effort — see "How it works" above.
+- Opacity's underlying mechanism is best-effort (title/class-matched, not
+  address-matched) — but the auto-sweep means a stale setting can't
+  outlive its window and leak into an unrelated one later. See "How it
+  works" above.
 - No automatic "detect a playing video and snap it" mode — see the FAQ
   above for why. `playerctl`-based auto-detection is a plausible future
   addition, flagged as a real ambiguity (which window, if several) rather

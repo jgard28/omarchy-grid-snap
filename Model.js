@@ -51,7 +51,29 @@ function mergeParams(saved) {
     ? Math.max(0, Math.round(saved.selectedCol)) : 0
   out.selectedRow = saved && typeof saved.selectedRow === "number" && isFinite(saved.selectedRow)
     ? Math.max(0, Math.round(saved.selectedRow)) : 0
+  // Every window this plugin has EVER applied a non-1.0 opacity window_rule
+  // to, and hasn't yet confirmed cleaned up -- {address, title, class}.
+  // This is what lets the service safely reset a stale rule once its
+  // window is confirmed closed (see Service.qml's sweepOpacityRules()) --
+  // without tracking exactly which titles/classes we've touched, there
+  // would be no way to know what to clean up, or any way to tell a rule
+  // this plugin is responsible for apart from one it never applied.
+  out.openRules = Array.isArray(saved && saved.openRules)
+    ? saved.openRules.filter(function (r) {
+        return r && typeof r.address === "string" && typeof r.title === "string"
+      })
+    : []
   return out
+}
+
+function addOpenRule(list, address, title, klass) {
+  var next = list.filter(function (r) { return r.address !== address })
+  next.push({ address: address, title: title, class: klass || "" })
+  return next
+}
+
+function removeOpenRule(list, address) {
+  return list.filter(function (r) { return r.address !== address })
 }
 
 function paramValue(params, key, fallback) {
@@ -117,6 +139,7 @@ function parseMonitors(json) {
       ? m.reserved.map(function (v) { return Number(v) || 0 })
       : [0, 0, 0, 0]
     out.push({
+      id: Number(m.id),
       name: m.name,
       x: Number(m.x) || 0,
       y: Number(m.y) || 0,
@@ -126,6 +149,12 @@ function parseMonitors(json) {
     })
   }
   return out
+}
+
+function monitorNameForId(monitors, id) {
+  for (var i = 0; i < monitors.length; i++)
+    if (monitors[i].id === id) return monitors[i].name
+  return ""
 }
 
 // Same idea for `hyprctl activewindow -j` -- just the fields we need to
@@ -140,6 +169,20 @@ function parseActiveWindow(json) {
     class: String(raw.class || ""),
     monitor: raw.monitor
   }
+}
+
+// Set of every window address currently open, from `hyprctl clients -j` --
+// used by the opacity-rule sweep to tell "this rule's window is still
+// open, leave it alone" apart from "that window is gone, safe to reset".
+function addressesFromClientsJson(json) {
+  var raw
+  try { raw = JSON.parse(json) } catch (e) { return [] }
+  if (!Array.isArray(raw)) return []
+  var out = []
+  for (var i = 0; i < raw.length; i++) {
+    if (raw[i] && typeof raw[i].address === "string") out.push(raw[i].address)
+  }
+  return out
 }
 
 // -----------------------------------------------------------------------
@@ -161,10 +204,36 @@ function parseActiveWindow(json) {
 // clients -j`, restore it) before being used here -- see this repo's
 // CHANGELOG.md for exactly what that verification covered.
 
+// Shared by every script below: turns a raw window title into a Lua
+// single-quoted string literal for use inside `match = { title = '...' }`,
+// anchored with ^...$ so it matches the WHOLE title, not a substring.
+// Emitted once here rather than copy-pasted into every script, since it
+// has to be exactly identical everywhere -- a mismatch between how a rule
+// gets APPLIED and how it gets RESET would leave the applied one stuck.
+function _titleEscapeSnippet() {
+  return "esc_title=$(printf '%s' \"$title\" | sed 's/[.^$*+?()\\[{|\\\\]/\\\\&/g')"
+}
+
+// The opacity window_rule call, parameterized by $opacity (e.g. "1.0" to
+// reset, or the real slider value to apply). Matching on BOTH title and
+// class (not title alone) meaningfully narrows the odds of ever affecting
+// an unrelated window that happens to share just the title -- accepted
+// without error when tested, though not independently confirmed to
+// actually narrow matching on this specific Hyprland build (there's no
+// way to introspect registered rules to be certain; see README).
+function _applyOpacitySnippet() {
+  return [
+    "if [ -n \"$title\" ]; then",
+    "  " + _titleEscapeSnippet(),
+    "  hyprctl eval \"hl.window_rule({ match = { title = '^${esc_title}$', class = '$class' }, opacity = '$opacity $opacity' })\" >/dev/null || true",
+    "fi"
+  ].join("\n")
+}
+
 function snapScript() {
   return [
     "set -euo pipefail",
-    "addr=\"$1\"; x=\"$2\"; y=\"$3\"; w=\"$4\"; h=\"$5\"; want_pin=\"$6\"; opacity=\"$7\"; title=\"$8\"",
+    "addr=\"$1\"; x=\"$2\"; y=\"$3\"; w=\"$4\"; h=\"$5\"; want_pin=\"$6\"; opacity=\"$7\"; title=\"$8\"; class=\"$9\"",
     "sel=\"address:$addr\"",
     "",
     "# Read current floating/pinned state so this is idempotent: clicking",
@@ -191,25 +260,25 @@ function snapScript() {
     "  hyprctl dispatch \"hl.dsp.window.pin({ action = 'toggle', window = '$sel' })\" >/dev/null",
     "fi",
     "",
-    "# Opacity is the one part of this plugin that's genuinely best-effort:",
-    "# there is no live, per-window-instance opacity dispatcher in this",
-    "# Hyprland Lua API -- only a declarative window_rule matched by",
-    "# title/class, not by address. That means it CAN affect another window",
-    "# that happens to share this exact title, and there's no confirmed way",
-    "# to later remove just this one rule (unsnap.sh re-applies opacity",
-    "# 1.0/1.0 to the same title match instead of trying to un-register it).",
-    "if [ -n \"$title\" ]; then",
-    "  esc_title=$(printf '%s' \"$title\" | sed 's/[.^$*+?()\\[{|\\\\]/\\\\&/g')",
-    "  hyprctl eval \"hl.window_rule({ match = { title = '^${esc_title}$' }, opacity = '$opacity $opacity' })\" >/dev/null || true",
-    "fi"
+    "# Opacity is the one part of this plugin that's genuinely best-effort --",
+    "# there is no live, per-window-INSTANCE opacity dispatcher in this",
+    "# Hyprland Lua API, only a declarative window_rule matched by",
+    "# title/class. Confirmed live: this rule OUTLIVES the window it was",
+    "# meant for and silently reapplies to any later window sharing the",
+    "# same title+class -- Service.qml tracks every window this rule gets",
+    "# applied to and sweeps/resets it once that window is confirmed",
+    "# closed (see sweepOpacityRules()), which is what actually keeps this",
+    "# safe, not anything in this script alone.",
+    _applyOpacitySnippet()
   ].join("\n")
 }
 
 function unsnapScript() {
   return [
     "set -euo pipefail",
-    "addr=\"$1\"; title=\"$2\"",
+    "addr=\"$1\"; title=\"$2\"; class=\"$3\"",
     "sel=\"address:$addr\"",
+    "opacity=1.0",
     "",
     "cur=$(hyprctl clients -j | jq -r --arg a \"$addr\" '.[] | select(.address==$a)')",
     "is_floating=$(printf '%s' \"$cur\" | jq -r '.floating // false')",
@@ -222,10 +291,19 @@ function unsnapScript() {
     "  hyprctl dispatch \"hl.dsp.window.float({ action = 'disable', window = '$sel' })\" >/dev/null",
     "fi",
     "",
-    "if [ -n \"$title\" ]; then",
-    "  esc_title=$(printf '%s' \"$title\" | sed 's/[.^$*+?()\\[{|\\\\]/\\\\&/g')",
-    "  hyprctl eval \"hl.window_rule({ match = { title = '^${esc_title}$' }, opacity = '1.0 1.0' })\" >/dev/null || true",
-    "fi"
+    _applyOpacitySnippet()
+  ].join("\n")
+}
+
+// Used by Service.qml's periodic sweep to reset a rule whose owning
+// window has ALREADY closed -- no address/float/pin work needed here,
+// since there's no window left to act on, only the lingering rule itself.
+function resetOpacityScript() {
+  return [
+    "set -euo pipefail",
+    "title=\"$1\"; class=\"$2\"",
+    "opacity=1.0",
+    _applyOpacitySnippet()
   ].join("\n")
 }
 

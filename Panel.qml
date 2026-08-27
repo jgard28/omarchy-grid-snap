@@ -29,6 +29,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  readonly property bool hasTarget: !!(fx && fx.targetAddress)
   readonly property var monitors: fx ? fx.monitors : []
   readonly property int gridCols: fx ? Math.round(Model.paramValue(fx.params, "gridCols", 2)) : 2
   readonly property int gridRows: fx ? Math.round(Model.paramValue(fx.params, "gridRows", 2)) : 2
@@ -71,6 +72,20 @@ Panel {
             font.pixelSize: Style.font.display
           }
         }
+      }
+
+      // Shown whenever there's nothing to act on -- without this, clicking
+      // Snap with no window captured just fails silently into a small
+      // error line at the bottom that's easy to miss. This puts the actual
+      // blocker front and center, right under the title, instead.
+      Text {
+        width: parent.width
+        visible: !root.hasTarget
+        text: "No window captured. Close this panel, focus the window you want to snap, then reopen it from the bar icon."
+        color: "#ffb347"
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
       }
 
       // --- Monitor picker -----------------------------------------------
@@ -277,7 +292,7 @@ Panel {
       Text {
         width: parent.width
         visible: root.fx && root.fx.params.opacity < 0.999
-        text: "Below 1.0, your real wallpaper/other windows will show through this one -- handy for keeping half an eye on a video while you work in front of it."
+        text: "Below 1.0, your real wallpaper/other windows will show through this one -- handy for keeping half an eye on a video while you work in front of it. (Applied via a title-matched rule rather than this exact window -- it's automatically cleaned up once this window closes, so it can't linger and affect something else later.)"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -300,6 +315,7 @@ Panel {
           width: (parent.width - Style.space(10)) * 0.6
           height: Style.space(36)
           radius: Style.space(8)
+          opacity: root.hasTarget ? 1.0 : 0.4
           color: Qt.darker(root.foreground, 4.0)
           border.width: 1
           border.color: root.foreground
@@ -315,7 +331,8 @@ Panel {
 
           MouseArea {
             anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
+            enabled: root.hasTarget
+            cursorShape: root.hasTarget ? Qt.PointingHandCursor : Qt.ArrowCursor
             onClicked: if (root.fx) root.fx.snap()
           }
         }
@@ -324,6 +341,7 @@ Panel {
           width: (parent.width - Style.space(10)) * 0.4
           height: Style.space(36)
           radius: Style.space(8)
+          opacity: root.hasTarget ? 1.0 : 0.4
           color: "transparent"
           border.width: 1
           border.color: Qt.darker(root.foreground, 2.0)
@@ -338,7 +356,8 @@ Panel {
 
           MouseArea {
             anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
+            enabled: root.hasTarget
+            cursorShape: root.hasTarget ? Qt.PointingHandCursor : Qt.ArrowCursor
             onClicked: if (root.fx) root.fx.unsnap()
           }
         }
