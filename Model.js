@@ -66,26 +66,45 @@ function paramValue(params, key, fallback) {
 // cell. This is pure arithmetic -- no rounding surprises to worry about
 // beyond the final Math.round(), since window position/size dispatchers
 // want whole pixels.
+//
+// Grid cells are carved out of the monitor's USABLE area -- monitor rect
+// minus `reserved` -- not the full physical monitor rect. `reserved` is
+// `hyprctl monitors -j`'s own [left, top, right, bottom] pixel margins
+// for whatever's claimed an exclusive layer-shell zone on that monitor
+// (confirmed: the Omarchy bar reserves 26px at the top on every monitor
+// via a real `"reserved": [0, 26, 0, 0]` from a live system). Skipping this
+// and dividing the raw monitor rect instead is exactly what put row 0
+// underneath/behind the bar -- the top of that cell landed at the
+// monitor's y origin, which is where the bar already lives.
 function cellRect(monitor, cols, rows, col, row) {
   cols = Math.max(1, Math.round(cols))
   rows = Math.max(1, Math.round(rows))
   col = clamp(Math.round(col), 0, cols - 1)
   row = clamp(Math.round(row), 0, rows - 1)
 
-  var cellW = monitor.width / cols
-  var cellH = monitor.height / rows
+  var reserved = (monitor.reserved && monitor.reserved.length === 4)
+    ? monitor.reserved : [0, 0, 0, 0]
+  var usable = {
+    x: monitor.x + reserved[0],
+    y: monitor.y + reserved[1],
+    width: Math.max(1, monitor.width - reserved[0] - reserved[2]),
+    height: Math.max(1, monitor.height - reserved[1] - reserved[3])
+  }
+
+  var cellW = usable.width / cols
+  var cellH = usable.height / rows
 
   return {
-    x: Math.round(monitor.x + col * cellW),
-    y: Math.round(monitor.y + row * cellH),
+    x: Math.round(usable.x + col * cellW),
+    y: Math.round(usable.y + row * cellH),
     w: Math.round(cellW),
     h: Math.round(cellH)
   }
 }
 
 // Parses `hyprctl monitors -j`'s stdout into the plain {name,x,y,width,
-// height} shape cellRect() above expects, dropping every other field
-// (scale, refresh rate, etc.) this plugin has no use for.
+// height,reserved} shape cellRect() above expects, dropping every other
+// field (scale, refresh rate, etc.) this plugin has no use for.
 function parseMonitors(json) {
   var raw
   try { raw = JSON.parse(json) } catch (e) { return [] }
@@ -94,12 +113,16 @@ function parseMonitors(json) {
   for (var i = 0; i < raw.length; i++) {
     var m = raw[i]
     if (!m || typeof m.name !== "string") continue
+    var reserved = Array.isArray(m.reserved) && m.reserved.length === 4
+      ? m.reserved.map(function (v) { return Number(v) || 0 })
+      : [0, 0, 0, 0]
     out.push({
       name: m.name,
       x: Number(m.x) || 0,
       y: Number(m.y) || 0,
       width: Number(m.width) || 0,
-      height: Number(m.height) || 0
+      height: Number(m.height) || 0,
+      reserved: reserved
     })
   }
   return out

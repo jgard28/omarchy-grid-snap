@@ -160,8 +160,15 @@ Panel {
           id: cellGrid
           width: parent.width
           readonly property var monitorRect: root.currentMonitorRect()
-          readonly property real aspect: monitorRect && monitorRect.height > 0
-            ? monitorRect.width / monitorRect.height : (16 / 9)
+          // Match against the USABLE area (monitor minus reserved bar
+          // space), same as Model.cellRect() actually snaps into -- using
+          // the raw monitor rect here would make the preview's aspect
+          // ratio very slightly off from where cells really land.
+          readonly property var reserved: monitorRect && Array.isArray(monitorRect.reserved) && monitorRect.reserved.length === 4
+            ? monitorRect.reserved : [0, 0, 0, 0]
+          readonly property real usableW: monitorRect ? Math.max(1, monitorRect.width - reserved[0] - reserved[2]) : 16
+          readonly property real usableH: monitorRect ? Math.max(1, monitorRect.height - reserved[1] - reserved[3]) : 9
+          readonly property real aspect: usableW / usableH
           height: width / aspect
 
           Grid {
